@@ -3,21 +3,15 @@ require('dotenv').config();
 const express   = require('express');
 const multer    = require('multer');
 const Anthropic = require('@anthropic-ai/sdk');
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
-const fs   = require('fs');
 
 // ─── Config ────────────────────────────────────────────────────────────────────
-const PORT         = process.env.PORT || 3000;
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const PORT            = process.env.PORT || 3000;
+const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
 const DESCRIBE_PROMPT = 'Describe what you see in this photo in 2-3 sentences';
-
-// Persistent data dir — override with DATA_DIR env var on Railway
-// Railway: set DATA_DIR=/data and mount a volume at /data
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const DB_PATH  = path.join(DATA_DIR, 'captures.json');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_KEY          = 'captures.json';   // stored in R2 alongside images
 
 // ─── Cloudflare R2 ─────────────────────────────────────────────────────────────
 const r2 = new S3Client({
@@ -36,7 +30,6 @@ async function uploadToR2(buffer, filename, mimetype) {
     Body:        buffer,
     ContentType: mimetype,
   }));
-  // R2_PUBLIC_URL is your bucket's public URL, e.g. https://pub-xxxx.r2.dev
   return `${process.env.R2_PUBLIC_URL}/${filename}`;
 }
 
@@ -51,15 +44,28 @@ async function deleteFromR2(filename) {
   }
 }
 
-// ─── JSON storage helpers ───────────────────────────────────────────────────────
-function readCaptures() {
-  if (!fs.existsSync(DB_PATH)) return [];
-  try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); }
-  catch { return []; }
+// ─── captures.json stored in R2 — no disk needed ───────────────────────────────
+async function readCaptures() {
+  try {
+    const res  = await r2.send(new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key:    DB_KEY,
+    }));
+    const body = await res.Body.transformToString();
+    return JSON.parse(body);
+  } catch (err) {
+    if (err.name === 'NoSuchKey') return [];   // first run
+    throw err;
+  }
 }
 
-function writeCaptures(captures) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(captures, null, 2), 'utf8');
+async function writeCaptures(captures) {
+  await r2.send(new PutObjectCommand({
+    Bucket:      process.env.R2_BUCKET_NAME,
+    Key:         DB_KEY,
+    Body:        JSON.stringify(captures, null, 2),
+    ContentType: 'application/json',
+  }));
 }
 
 // ─── Multer ─────────────────────────────────────────────────────────────────────
@@ -114,12 +120,10 @@ app.post('/api/capture', upload.single('photo'), async (req, res) => {
     if (!latitude)  return res.status(400).json({ error: 'latitude is required' });
     if (!longitude) return res.status(400).json({ error: 'longitude is required' });
 
-    // Upload image to R2
     const ext      = req.file.mimetype === 'image/png' ? '.png' : '.jpg';
     const filename = `${uuidv4()}${ext}`;
     const photoUrl = await uploadToR2(req.file.buffer, filename, req.file.mimetype);
 
-    // Get Claude description
     let description = '';
     try {
       description = await describeImage(req.file.buffer, req.file.mimetype);
@@ -128,11 +132,10 @@ app.post('/api/capture', upload.single('photo'), async (req, res) => {
       description = '(Description unavailable)';
     }
 
-    // Persist capture record
     const capture = {
       id: uuidv4(),
-      filename,   // kept for R2 deletion
-      photoUrl,   // public CDN URL used by the dashboard
+      filename,
+      photoUrl,
       address,
       latitude:  parseFloat(latitude),
       longitude: parseFloat(longitude),
@@ -140,9 +143,9 @@ app.post('/api/capture', upload.single('photo'), async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    const captures = readCaptures();
+    const captures = await readCaptures();
     captures.unshift(capture);
-    writeCaptures(captures);
+    await writeCaptures(captures);
 
     res.status(201).json(capture);
   } catch (err) {
@@ -152,21 +155,29 @@ app.post('/api/capture', upload.single('photo'), async (req, res) => {
 });
 
 // ── GET /api/captures ───────────────────────────────────────────────────────────
-app.get('/api/captures', (_req, res) => {
-  res.json(readCaptures());
+app.get('/api/captures', async (_req, res) => {
+  try {
+    res.json(await readCaptures());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── DELETE /api/captures/:id ────────────────────────────────────────────────────
 app.delete('/api/captures/:id', async (req, res) => {
-  let captures = readCaptures();
-  const target = captures.find(c => c.id === req.params.id);
-  if (!target) return res.status(404).json({ error: 'Not found' });
+  try {
+    let captures = await readCaptures();
+    const target = captures.find(c => c.id === req.params.id);
+    if (!target) return res.status(404).json({ error: 'Not found' });
 
-  await deleteFromR2(target.filename);
+    await deleteFromR2(target.filename);
+    captures = captures.filter(c => c.id !== req.params.id);
+    await writeCaptures(captures);
 
-  captures = captures.filter(c => c.id !== req.params.id);
-  writeCaptures(captures);
-  res.json({ ok: true });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────────
