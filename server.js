@@ -10,7 +10,7 @@ const path = require('path');
 // ─── Config ────────────────────────────────────────────────────────────────────
 const PORT            = process.env.PORT || 3000;
 const CLAUDE_MODEL    = 'claude-sonnet-4-20250514';
-const DESCRIBE_PROMPT = 'Describe what you see in this photo in 2-3 sentences';
+const DESCRIBE_PROMPT = 'Describe what you see in this photo in one concise sentence.';
 const DB_KEY          = 'captures.json';   // stored in R2 alongside images
 
 // ─── Cloudflare R2 ─────────────────────────────────────────────────────────────
