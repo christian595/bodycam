@@ -188,8 +188,13 @@
     .card-coords {
       font-size: 11px;
       color: var(--muted);
-      font-variant-numeric: tabular-nums;
+      text-decoration: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 75%;
     }
+    .card-coords:hover { color: var(--accent); }
     .btn-delete {
       background: none;
       border: none;
@@ -313,7 +318,6 @@ function renderCard(c) {
       </div>
       <p class="card-description">${escHtml(c.description)}</p>
       <div class="card-footer">
-        <span class="card-coords">${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)}</span>
         <button class="btn-delete" title="Delete capture" data-id="${c.id}">🗑</button>
       </div>
     </div>
